@@ -1,12 +1,11 @@
-package com.example.ui.components
+                                                        contours.add(Pair(finalX, ny))
+                                                    }
+             package com.example.ui.components
 
 import android.util.Log
-import android.util.Size
 import androidx.annotation.OptIn
-import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ExperimentalGetImage
-import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -53,116 +52,668 @@ fun RealCameraPreview(
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    var cameraErrorMessage by remember { mutableStateOf<String?>(null) }
 
-    val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
-    val batteryOptimizer = remember { BatteryOptimizer() }
-    val lightingEnhancer = remember { LightingEnhancer() }
+    var cameraErrorMessage by remember {
+        mutableStateOf<String?>(null)
+    }
 
-    // Google ML Kit Face Detector: unconstrained landmarks, contours, and proximity tracking
+    /*
+     * These resources live for the entire lifetime of this composable.
+     * They must NOT be closed when switching front/back camera.
+     */
+    val cameraExecutor = remember {
+        Executors.newSingleThreadExecutor()
+    }
+
+    val batteryOptimizer = remember {
+        BatteryOptimizer()
+    }
+
+    val lightingEnhancer = remember {
+        LightingEnhancer()
+    }
+
     val faceDetector: FaceDetector = remember {
         val options = FaceDetectorOptions.Builder()
-            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
-            .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
-            .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
-            .setContourMode(FaceDetectorOptions.CONTOUR_MODE_ALL)
-            .setMinFaceSize(0.10f) // Can detect face even when far away
+            .setPerformanceMode(
+                FaceDetectorOptions.PERFORMANCE_MODE_FAST
+            )
+            .setLandmarkMode(
+                FaceDetectorOptions.LANDMARK_MODE_ALL
+            )
+            .setClassificationMode(
+                FaceDetectorOptions.CLASSIFICATION_MODE_ALL
+            )
+            .setContourMode(
+                FaceDetectorOptions.CONTOUR_MODE_ALL
+            )
+            .setMinFaceSize(0.10f)
             .enableTracking()
             .build()
+
         FaceDetection.getClient(options)
     }
 
+    /*
+     * PreviewView is also remembered so CameraX always binds
+     * to the same Android View.
+     */
     val previewView = remember {
         PreviewView(context).apply {
-            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-            scaleType = PreviewView.ScaleType.FILL_CENTER
+            implementationMode =
+                PreviewView.ImplementationMode.COMPATIBLE
+
+            scaleType =
+                PreviewView.ScaleType.FILL_CENTER
         }
     }
 
-    DisposableEffect(isFrontCamera, lifecycleOwner) {
-        val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
-        val mainExecutor = ContextCompat.getMainExecutor(context)
+    /*
+     * Camera lifecycle.
+     *
+     * This effect is recreated when:
+     * - front/back camera changes
+     * - lifecycle owner changes
+     *
+     * But executor and ML Kit detector remain alive.
+     */
+    DisposableEffect(
+        isFrontCamera,
+        lifecycleOwner
+    ) {
 
-        cameraProviderFuture.addListener({
-            try {
-                val cameraProvider = cameraProviderFuture.get()
+        val cameraProviderFuture =
+            ProcessCameraProvider.getInstance(context)
 
-                val preferredLens = if (isFrontCamera) {
-                    CameraSelector.LENS_FACING_FRONT
-                } else {
-                    CameraSelector.LENS_FACING_BACK
-                }
+        val mainExecutor =
+            ContextCompat.getMainExecutor(context)
 
-                val hasPreferred = cameraProvider.hasCamera(
-                    CameraSelector.Builder().requireLensFacing(preferredLens).build()
-                )
+        cameraProviderFuture.addListener(
+            {
 
-                val cameraSelector = if (hasPreferred) {
-                    CameraSelector.Builder().requireLensFacing(preferredLens).build()
-                } else if (cameraProvider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA)) {
-                    CameraSelector.DEFAULT_BACK_CAMERA
-                } else if (cameraProvider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA)) {
-                    CameraSelector.DEFAULT_FRONT_CAMERA
-                } else {
-                    null
-                }
+                try {
 
-                if (cameraSelector != null) {
-                    val preview = Preview.Builder().build().also {
-                        it.surfaceProvider = previewView.surfaceProvider
+                    val cameraProvider =
+                        cameraProviderFuture.get()
+
+                    /*
+                     * Select requested lens.
+                     */
+                    val preferredLens =
+                        if (isFrontCamera) {
+                            CameraSelector.LENS_FACING_FRONT
+                        } else {
+                            CameraSelector.LENS_FACING_BACK
+                        }
+
+                    val preferredSelector =
+                        CameraSelector.Builder()
+                            .requireLensFacing(preferredLens)
+                            .build()
+
+                    /*
+                     * Check whether requested camera actually exists.
+                     */
+                    val hasPreferred =
+                        cameraProvider.hasCamera(
+                            preferredSelector
+                        )
+
+                    val cameraSelector =
+                        when {
+                            hasPreferred -> {
+                                preferredSelector
+                            }
+
+                            cameraProvider.hasCamera(
+                                CameraSelector.DEFAULT_BACK_CAMERA
+                            ) -> {
+                                CameraSelector.DEFAULT_BACK_CAMERA
+                            }
+
+                            cameraProvider.hasCamera(
+                                CameraSelector.DEFAULT_FRONT_CAMERA
+                            ) -> {
+                                CameraSelector.DEFAULT_FRONT_CAMERA
+                            }
+
+                            else -> {
+                                null
+                            }
+                        }
+
+                    if (cameraSelector == null) {
+
+                        cameraErrorMessage =
+                            "لا توجد كاميرا متوفرة على هذا الجهاز"
+
+                        return@addListener
                     }
 
-                    // ImageAnalysis stream with Google ML Kit Face Detection
+                    /*
+                     * CameraX Preview.
+                     */
+                    val preview =
+                        Preview.Builder()
+                            .build()
+                            .also {
+                                it.surfaceProvider =
+                                    previewView.surfaceProvider
+                            }
+
+                    /*
+                     * CameraX ImageAnalysis.
+                     */
                     @OptIn(ExperimentalGetImage::class)
-                    val imageAnalysis = BatteryOptimizer.buildOptimizedImageAnalysis()
-                        .also { analysis ->
-                            analysis.setAnalyzer(cameraExecutor) { imageProxy: ImageProxy ->
-                                val mediaImage = imageProxy.image
-                                if (mediaImage != null) {
-                                    // 1. Calculate lighting / average brightness
-                                    val avgBrightness = computeAverageBrightness(imageProxy)
-                                    onBrightnessEvaluated(avgBrightness)
-                                    lightingEnhancer.evaluateAndAdjust(avgBrightness, isFrontCamera)
+                    val imageAnalysis =
+                        BatteryOptimizer
+                            .buildOptimizedImageAnalysis()
+                            .also { analysis ->
 
-                                    // 2. Battery & thermal adaptive frame skipping
-                                    batteryOptimizer.updateStrategy(context)
-                                    if (!batteryOptimizer.shouldProcess()) {
-                                        imageProxy.close()
-                                        return@setAnalyzer
-                                    }
+                                analysis.setAnalyzer(
+                                    cameraExecutor
+                                ) { imageProxy: ImageProxy ->
 
-                                    val rotation = imageProxy.imageInfo.rotationDegrees
-                                    val image = InputImage.fromMediaImage(mediaImage, rotation)
-                                    // Effective image dimensions after taking rotation into account
-                                    val isRotated = rotation == 90 || rotation == 270
-                                    val imgW = if (isRotated) imageProxy.height.toFloat() else imageProxy.width.toFloat()
-                                    val imgH = if (isRotated) imageProxy.width.toFloat() else imageProxy.height.toFloat()
+                                    processCameraFrame(
+                                        imageProxy = imageProxy,
+                                        isFrontCamera = isFrontCamera,
+                                        context = context,
+                                        batteryOptimizer = batteryOptimizer,
+                                        lightingEnhancer = lightingEnhancer,
+                                        faceDetector = faceDetector,
+                                        onFaceStateChanged = onFaceStateChanged,
+                                        onBrightnessEvaluated = onBrightnessEvaluated
+                                    )
+                                }
+                            }
 
-                                    faceDetector.process(image)
-                                        .addOnSuccessListener { faces ->
-                                            if (faces.isEmpty()) {
-                                                onFaceStateChanged(FaceDetectionState(faceDetected = false))
-                                            } else {
-                                                val face = faces[0]
-                                                val bounds = face.boundingBox
+                    /*
+                     * Remove previous CameraX bindings before
+                     * binding the new camera.
+                     */
+                    cameraProvider.unbindAll()
 
-                                                // Compute normalized coordinates [0.0..1.0] regardless of distance or resolution
-                                                val normLeft = (bounds.left.toFloat() / imgW).coerceIn(0f, 1f)
-                                                val normTop = (bounds.top.toFloat() / imgH).coerceIn(0f, 1f)
-                                                val normRight = (bounds.right.toFloat() / imgW).coerceIn(0f, 1f)
-                                                val normBottom = (bounds.bottom.toFloat() / imgH).coerceIn(0f, 1f)
+                    /*
+                     * Bind Preview + ImageAnalysis.
+                     */
+                    val boundCamera =
+                        cameraProvider.bindToLifecycle(
+                            lifecycleOwner,
+                            cameraSelector,
+                            preview,
+                            imageAnalysis
+                        )
 
-                                                // Normalized contour points from ML Kit
-                                                val contours = mutableListOf<Pair<Float, Float>>()
-                                                face.allContours.forEach { c ->
-                                                    c.points.forEach { pt ->
-                                                        val nx = (pt.x / imgW).coerceIn(0f, 1f)
-                                                        val ny = (pt.y / imgH).coerceIn(0f, 1f)
-                                                        // If front camera, mirror horizontally for natural preview alignment
-                                                        val finalX = if (isFrontCamera) 1f - nx else nx
-                                                        contours.add(Pair(finalX, ny))
-                                                    }
-                                                }
+                    lightingEnhancer.updateCamera(
+                        boundCamera
+                    )
+
+                    cameraErrorMessage = null
+
+                    Log.d(
+                        "RealCameraPreview",
+                        "Camera started successfully. Front=$isFrontCamera"
+                    )
+
+                } catch (e: Exception) {
+
+                    Log.e(
+                        "RealCameraPreview",
+                        "Failed to bind camera lifecycle",
+                        e
+                    )
+
+                    cameraErrorMessage =
+                        "تعذر تشغيل الكاميرا الحية: ${e.localizedMessage}"
+                }
+
+            },
+            mainExecutor
+        )
+
+        /*
+         * IMPORTANT:
+         *
+         * When this effect is recreated, only CameraX bindings
+         * are removed.
+         *
+         * Executor and ML Kit detector stay alive.
+         */
+        onDispose {
+
+            try {
+
+                if (cameraProviderFuture.isDone) {
+
+                    cameraProviderFuture
+                        .get()
+                        .unbindAll()
+                }
+
+            } catch (ignored: Exception) {
+                Log.w(
+                    "RealCameraPreview",
+                    "Camera cleanup warning",
+                    ignored
+                )
+            }
+        }
+    }
+
+    /*
+     * Close long-lived resources ONLY when this composable
+     * completely leaves the composition.
+     */
+    DisposableEffect(Unit) {
+
+        onDispose {
+
+            try {
+                cameraExecutor.shutdown()
+            } catch (ignored: Exception) {
+            }
+
+            try {
+                faceDetector.close()
+            } catch (ignored: Exception) {
+            }
+        }
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .testTag("real_camera_preview_box")
+    ) {
+
+        AndroidView(
+            factory = {
+                previewView
+            },
+            modifier = Modifier
+                .fillMaxSize()
+                .testTag("camera_preview_view")
+        )
+
+        /*
+         * Screen light boost for front camera.
+         */
+        ScreenLightBoost(
+            enabled =
+                isFrontCamera &&
+                lightingEnhancer
+                    .isScreenBoostActive
+                    .value,
+            brightness = 1.0f
+        )
+
+        /*
+         * Camera error.
+         */
+        if (cameraErrorMessage != null) {
+
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Color(0xAA000000)
+                    )
+                    .padding(16.dp),
+                contentAlignment =
+                    Alignment.Center
+            ) {
+
+                Text(
+                    text =
+                        cameraErrorMessage ?: "",
+                    color = Color.White,
+                    fontSize = 13.sp
+                )
+            }
+        }
+    }
+}
+
+
+/**
+ * Processes one CameraX frame.
+ *
+ * This function is deliberately separated from the
+ * Compose lifecycle code so ImageProxy is always closed.
+ */
+@OptIn(ExperimentalGetImage::class)
+private fun processCameraFrame(
+    imageProxy: ImageProxy,
+    isFrontCamera: Boolean,
+    context: android.content.Context,
+    batteryOptimizer: BatteryOptimizer,
+    lightingEnhancer: LightingEnhancer,
+    faceDetector: FaceDetector,
+    onFaceStateChanged: (FaceDetectionState) -> Unit,
+    onBrightnessEvaluated: (Float) -> Unit
+) {
+
+    try {
+
+        val mediaImage =
+            imageProxy.image
+
+        if (mediaImage == null) {
+            imageProxy.close()
+            return
+        }
+
+        /*
+         * 1. Lighting analysis.
+         */
+        val avgBrightness =
+            computeAverageBrightness(
+                imageProxy
+            )
+
+        onBrightnessEvaluated(
+            avgBrightness
+        )
+
+        lightingEnhancer.evaluateAndAdjust(
+            avgBrightness,
+            isFrontCamera
+        )
+
+        /*
+         * 2. Battery / thermal optimization.
+         */
+        batteryOptimizer.updateStrategy(
+            context
+        )
+
+        if (!batteryOptimizer.shouldProcess()) {
+
+            imageProxy.close()
+            return
+        }
+
+        /*
+         * 3. Rotation.
+         */
+        val rotation =
+            imageProxy.imageInfo.rotationDegrees
+
+        val image =
+            InputImage.fromMediaImage(
+                mediaImage,
+                rotation
+            )
+
+        /*
+         * Camera image dimensions after rotation.
+         */
+        val isRotated =
+            rotation == 90 ||
+            rotation == 270
+
+        val imgW =
+            if (isRotated) {
+                imageProxy.height.toFloat()
+            } else {
+                imageProxy.width.toFloat()
+            }
+
+        val imgH =
+            if (isRotated) {
+                imageProxy.width.toFloat()
+            } else {
+                imageProxy.height.toFloat()
+            }
+
+        /*
+         * 4. ML Kit face detection.
+         */
+        faceDetector
+            .process(image)
+            .addOnSuccessListener { faces ->
+
+                if (faces.isEmpty()) {
+
+                    onFaceStateChanged(
+                        FaceDetectionState(
+                            faceDetected = false,
+                            faceCount = 0
+                        )
+                    )
+
+                    return@addOnSuccessListener
+                }
+
+                /*
+                 * Use the largest detected face.
+                 * This prevents a small background face
+                 * from becoming the primary face.
+                 */
+                val face =
+                    faces.maxByOrNull {
+                        it.boundingBox.width() *
+                        it.boundingBox.height()
+                    } ?: return@addOnSuccessListener
+
+                val bounds =
+                    face.boundingBox
+
+                /*
+                 * Normalized bounding box.
+                 */
+                val normLeft =
+                    (
+                        bounds.left.toFloat() /
+                        imgW
+                    ).coerceIn(0f, 1f)
+
+                val normTop =
+                    (
+                        bounds.top.toFloat() /
+                        imgH
+                    ).coerceIn(0f, 1f)
+
+                val normRight =
+                    (
+                        bounds.right.toFloat() /
+                        imgW
+                    ).coerceIn(0f, 1f)
+
+                val normBottom =
+                    (
+                        bounds.bottom.toFloat() /
+                        imgH
+                    ).coerceIn(0f, 1f)
+
+                /*
+                 * Dynamic contour points.
+                 */
+                val contours =
+                    mutableListOf<Pair<Float, Float>>()
+
+                face.allContours.forEach { contour ->
+
+                    contour.points.forEach { point ->
+
+                        val nx =
+                            (
+                                point.x /
+                                imgW
+                            ).coerceIn(0f, 1f)
+
+                        val ny =
+                            (
+                                point.y /
+                                imgH
+                            ).coerceIn(0f, 1f)
+
+                        val finalX =
+                            if (isFrontCamera) {
+                                1f - nx
+                            } else {
+                                nx
+                            }
+
+                        contours.add(
+                            Pair(finalX, ny)
+                        )
+                    }
+                }
+
+                /*
+                 * Dynamic landmark points.
+                 */
+                val landmarks =
+                    mutableListOf<Pair<Float, Float>>()
+
+                face.allLandmarks.forEach { landmark ->
+
+                    val point =
+                        landmark.position
+
+                    val nx =
+                        (
+                            point.x /
+                            imgW
+                        ).coerceIn(0f, 1f)
+
+                    val ny =
+                        (
+                            point.y /
+                            imgH
+                        ).coerceIn(0f, 1f)
+
+                    val finalX =
+                        if (isFrontCamera) {
+                            1f - nx
+                        } else {
+                            nx
+                        }
+
+                    landmarks.add(
+                        Pair(finalX, ny)
+                    )
+                }
+
+                /*
+                 * Face size relative to camera frame.
+                 */
+                val faceWidthFraction =
+                    (
+                        normRight -
+                        normLeft
+                    ).coerceIn(
+                        0.05f,
+                        1f
+                    )
+
+                /*
+                 * Build live face state.
+                 */
+                val state =
+                    FaceDetectionState(
+
+                        faceDetected = true,
+
+                        faceCount = faces.size,
+
+                        faceBounds = bounds,
+
+                        normalizedBounds =
+                            NormalizedFaceRect(
+                                left =
+                                    if (isFrontCamera) {
+                                        1f - normRight
+                                    } else {
+                                        normLeft
+                                    },
+
+                                top = normTop,
+
+                                right =
+                                    if (isFrontCamera) {
+                                        1f - normLeft
+                                    } else {
+                                        normRight
+                                    },
+
+                                bottom = normBottom
+                            ),
+
+                        isSmiling =
+                            (
+                                face.smilingProbability
+                                    ?: 0f
+                            ) > 0.5f,
+
+                        leftEyeOpen =
+                            (
+                                face.leftEyeOpenProbability
+                                    ?: 1f
+                            ) > 0.5f,
+
+                        rightEyeOpen =
+                            (
+                                face.rightEyeOpenProbability
+                                    ?: 1f
+                            ) > 0.5f,
+
+                        headEulerAngleY =
+                            face.headEulerAngleY,
+
+                        headEulerAngleX =
+                            face.headEulerAngleX,
+
+                        headEulerAngleZ =
+                            face.headEulerAngleZ,
+
+                        landmarkPoints =
+                            landmarks,
+
+                        contourPoints =
+                            contours,
+
+                        relativeFaceWidthFraction =
+                            faceWidthFraction
+                    )
+
+                onFaceStateChanged(
+                    state
+                )
+            }
+            .addOnFailureListener { error ->
+
+                Log.e(
+                    "RealCameraPreview",
+                    "ML Kit Face Detection error",
+                    error
+                )
+            }
+            .addOnCompleteListener {
+
+                /*
+                 * CRITICAL:
+                 * Every analyzed frame must eventually
+                 * release its ImageProxy.
+                 */
+                imageProxy.close()
+            }
+
+    } catch (e: Exception) {
+
+        Log.e(
+            "RealCameraPreview",
+            "Frame processing error",
+            e
+        )
+
+        /*
+         * Never leave ImageProxy locked.
+         */
+        imageProxy.close()
+    }
+}                                   }
 
                                                 // Normalized landmark points
                                                 val landmarks = mutableListOf<Pair<Float, Float>>()
