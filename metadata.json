@@ -1,0 +1,6 @@
+{
+  "name": "Beauty Intelligence",
+  "description": "AI-powered facial skin analysis with 468 landmark mesh detection, region segmentation, environmental checks, and personalized dermatological reports.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
